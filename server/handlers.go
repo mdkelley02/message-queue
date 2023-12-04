@@ -5,18 +5,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-
-	"github.com/gorilla/mux"
 )
 
 func (s *Server) GetTopicsHandler(w http.ResponseWriter, r *http.Request) {
-	topics := make([]string, 0, len(s.messages))
-	for topic := range s.messages {
-		topics = append(topics, topic)
+	response := GetTopicsResponse{
+		Topics: make([]string, 0, len(s.messages)),
 	}
 
-	response := GetTopicsResponse{
-		Topics: topics,
+	for topic := range s.messages {
+		response.Topics = append(response.Topics, topic)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -42,32 +39,16 @@ func (s *Server) PublishHandler(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info(fmt.Sprintf("request: %v", request))
 
-	// initialize memory for topic if it doesn't exist
-	s.upsertTopic(topic)
-
-	// write message to storage
-	offset, err := s.storage[topic].Put(request.Body)
+	// publish message to topic
+	publishResp, err := s.publishMessage(topic, request)
 	if err != nil {
-		slog.Error("could not write message to storage: %v", err)
-		http.Error(w, "could not write message to storage", http.StatusInternalServerError)
+		slog.Error("could not publish message: %v", err)
+		http.Error(w, "could not publish message", http.StatusInternalServerError)
 		return
 	}
 
-	// write message to topic
-	go func() {
-		s.messages[topic] <- Message{
-			Id:     fmt.Sprintf("%s-%d", topic, offset),
-			Offset: offset,
-		}
-	}()
-
-	// write response
-	response := PublishResponse{
-		Offset: offset,
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(publishResp)
 }
 
 func (s *Server) SubscribeHandler(w http.ResponseWriter, r *http.Request) {
@@ -87,8 +68,10 @@ func (s *Server) SubscribeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// initialize memory for topic if it doesn't exist
+	// create topic if it does not exist
 	s.upsertTopic(topic)
+
+	topicStorage := s.storage[topic]
 
 	// subscribe to topic
 	for {
@@ -100,47 +83,28 @@ func (s *Server) SubscribeHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		value, err := s.storage[topic].Get(message.Offset)
+		value, err := topicStorage.Get(message.Offset)
 		if err != nil {
 			slog.Error("could not read message from storage: %v", err)
 			http.Error(w, "could not read message from storage", http.StatusInternalServerError)
 		}
 
 		// delete message from storage
-		if err := s.storage[topic].Delete(message.Offset); err != nil {
+		if err := topicStorage.Delete(message.Offset); err != nil {
 			slog.Error("could not delete message from storage: %v", err)
 			http.Error(w, "could not delete message from storage", http.StatusInternalServerError)
 			return
 		}
 
-		slog.Info(fmt.Sprintf("value: %s", value))
-
-		subMessage := SubscriptionMessage{
+		// write message to connection
+		if err := conn.WriteJSON(Delivery{
 			Topic:     topic,
 			MessageId: message.Id,
 			Value:     value,
-		}
-
-		// write message to connection
-		if err := conn.WriteJSON(subMessage); err != nil {
+		}); err != nil {
 			slog.Error("could not write message to connection: %v", err)
 			http.Error(w, "could not write message to connection", http.StatusInternalServerError)
 			return
 		}
 	}
-}
-
-func (s *Server) upsertTopic(topic string) {
-	if _, ok := s.messages[topic]; !ok {
-		s.messages[topic] = make(chan Message)
-	}
-
-	if _, ok := s.storage[topic]; !ok {
-		s.storage[topic] = s.makeStorageFunc()
-	}
-}
-
-func getTopicFromUrl(r *http.Request) string {
-	vars := mux.Vars(r)
-	return vars["topic"]
 }

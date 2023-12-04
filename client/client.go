@@ -14,16 +14,18 @@ import (
 type IMessageQueueClient interface {
 	GetTopics() ([]string, error)
 	Publish(topic string, message string) (server.PublishResponse, error)
-	Subscribe(topic string, callback func(server.SubscriptionMessage)) error
+	Subscribe(topic string, callback func(server.Delivery) error) (chan struct{}, error)
 }
 
 type MessageQueueClient struct {
-	addr string
+	addr              string
+	deadLetterEnabled bool
 }
 
-func NewMessageQueueClient(addr string) IMessageQueueClient {
+func NewMessageQueueClient(addr string, deadLetterEnabled bool) IMessageQueueClient {
 	return &MessageQueueClient{
-		addr: addr,
+		addr:              addr,
+		deadLetterEnabled: deadLetterEnabled,
 	}
 }
 
@@ -77,24 +79,45 @@ func (c *MessageQueueClient) Publish(topic string, message string) (server.Publi
 	return response, nil
 }
 
-func (c *MessageQueueClient) Subscribe(topic string, callback func(server.SubscriptionMessage)) error {
-	conn, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("ws://%s/topics/%s", c.addr, topic), nil)
+func (c *MessageQueueClient) Subscribe(topic string, callback func(server.Delivery) error) (chan struct{}, error) {
+	return c.subscribeWithConn(topic, func(conn *websocket.Conn) {
+		var message server.Delivery
+		if err := conn.ReadJSON(&message); err != nil {
+			slog.Error("could not read message: %v", err)
+			return
+		}
+
+		if err := callback(message); err != nil {
+			slog.Error("could not process message: %v", err)
+
+			if c.deadLetterEnabled {
+				if _, err := c.Publish(fmt.Sprintf("%s.deadletter", topic), message.Value); err != nil {
+					slog.Error("could not publish message to dead letter queue: %v", err)
+				}
+			}
+		}
+	})
+}
+
+func (c *MessageQueueClient) subscribeWithConn(topic string, callback func(*websocket.Conn)) (chan struct{}, error) {
+	conn, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("ws://%s/topics/%s/subscribe", c.addr, topic), nil)
 	if err != nil {
 		slog.Error("could not subscribe: %v", err)
-		return err
+		return nil, err
 	}
+
+	quit := make(chan struct{})
 
 	go func() {
 		for {
-			var message server.SubscriptionMessage
-			if err := conn.ReadJSON(&message); err != nil {
-				slog.Error("could not read message: %v", err)
+			select {
+			case <-quit:
 				return
+			default:
+				callback(conn)
 			}
-
-			callback(message)
 		}
 	}()
 
-	return nil
+	return quit, nil
 }

@@ -9,9 +9,15 @@ import (
 
 func main() {
 	slog.Info("Starting Message Queue")
-	s := server.NewServer(":8080", storage.NewStorage)
+
+	s := server.NewServer(server.ServerConfig{
+		ServerAddr:      ":8080",
+		MetricsAddr:     ":8081",
+		MakeStorageFunc: storage.NewStorage,
+	})
 	if err := s.Start(); err != nil {
 		slog.Error("Could not start server: %v", err)
 	}
+
 	slog.Info("Stopping Message Queue")
 }

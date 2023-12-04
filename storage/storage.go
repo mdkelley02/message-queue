@@ -14,39 +14,44 @@ type IStorage interface {
 }
 
 type Storage struct {
-	lock  *sync.Mutex
-	store []string
+	rwLock *sync.RWMutex
+	store  []string
 }
 
 func NewStorage() IStorage {
 	return &Storage{
-		store: make([]string, 0),
-		lock:  &sync.Mutex{},
+		store:  make([]string, 0),
+		rwLock: &sync.RWMutex{},
 	}
 }
 
 func (s *Storage) Get(offset int) (string, error) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
+	s.rwLock.RLock()
+	defer s.rwLock.RUnlock()
 
-	if offset >= len(s.store) {
+	if offset >= len(s.store) || offset < 0 {
 		return "", ErrNotFound
 	}
 
-	return s.store[offset], nil
+	value := s.store[offset]
+	if value == "" {
+		return "", ErrNotFound
+	}
+
+	return value, nil
 }
 
 func (s *Storage) Put(data string) (int, error) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
+	s.rwLock.Lock()
+	defer s.rwLock.Unlock()
 
 	s.store = append(s.store, data)
 	return len(s.store) - 1, nil
 }
 
 func (s *Storage) Delete(offset int) error {
-	s.lock.Lock()
-	defer s.lock.Unlock()
+	s.rwLock.Lock()
+	defer s.rwLock.Unlock()
 
 	if offset >= len(s.store) {
 		return ErrNotFound
